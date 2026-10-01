@@ -21,6 +21,11 @@ set -a; source "$ROOT/config.env"; set +a
 
 deploy() {
   local fn="$1" region="$2" zip="$3"
+  # On Windows, the AWS CLI is a native exe and doesn't understand MSYS
+  # paths (/c/...), so convert to a Windows path when cygpath exists.
+  if command -v cygpath >/dev/null 2>&1; then
+    zip="$(cygpath -w "$zip")"
+  fi
   echo "Deploying $fn ($region)..."
   aws lambda update-function-code \
     --function-name "$fn" \
