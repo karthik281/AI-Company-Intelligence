@@ -1,0 +1,24 @@
+# Build output and vendored dependencies
+dist/
+*.zip
+build/
+
+# Local config and secrets
+config.env
+.env
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Test output
+tests/out/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
