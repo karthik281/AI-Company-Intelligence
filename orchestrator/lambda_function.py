@@ -302,11 +302,15 @@ def get_recipients():
             if line.strip() and not line.strip().startswith("#")
         ]
     except ClientError as e:
-        if e.response["Error"]["Code"] not in ("NoSuchKey", "404"):
+        code = e.response["Error"]["Code"]
+        if code not in ("NoSuchKey", "404", "AccessDenied"):
             raise
         print(
-            f"No recipients file at s3://{S3_BUCKET}/{RECIPIENTS_S3_KEY}, "
-            "falling back to SES_RECIPIENT_EMAIL"
+            f"{'ERROR' if code == 'AccessDenied' else 'WARNING'}: could not "
+            f"read s3://{S3_BUCKET}/{RECIPIENTS_S3_KEY} ({code}), falling "
+            "back to SES_RECIPIENT_EMAIL. "
+            + ("Check the Lambda role has s3:GetObject on config/*."
+               if code == "AccessDenied" else "")
         )
 
     if not recipients:
