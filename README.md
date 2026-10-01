@@ -36,11 +36,16 @@ Requires the AWS CLI, configured with access to both Lambdas and the bucket.
 | Orchestrator code | `scripts/deploy.sh orchestrator` |
 | Research code | `scripts/deploy.sh research` |
 | Prompts | `scripts/push_prompts.sh` |
-| Run tests (mocked AWS) | `python3 tests/test_pipeline.py` |
+| Recipient list | `scripts/push_recipients.sh` |
+| Run the end-to-end test (mocked AWS) | `python3 tests/test_pipeline.py` |
+| Run all tests | `for f in tests/test_*.py; do python3 "$f" || break; done` |
 
 Then commit: `git add -A && git commit -m "..." && git push`.
 
-Tests need `pip install boto3 markdown reportlab`.
+Tests need `pip install boto3 markdown reportlab`. `tests/test_pipeline.py` is the
+full mocked end-to-end run; `tests/test_*_unit.py` and `tests/test_recipients.py`
+are focused unit tests (stdlib `unittest`, no extra dependencies) for the
+business-logic functions in each Lambda and in `pdf_report.py`.
 
 ## Orchestrator environment variables
 
