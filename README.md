@@ -24,6 +24,7 @@ Google News RSS ─> classify funding events (Bedrock)
 ```bash
 cp config.example.env config.env      # fill in function names
 scripts/pull_prompts.sh               # copy prompts from S3
+scripts/pull_recipients.sh            # copy the recipient list from S3
 ```
 
 Requires the AWS CLI, configured with access to both Lambdas and the bucket.

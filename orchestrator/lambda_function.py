@@ -49,12 +49,17 @@ RESEARCH_LAMBDA_NAME = os.environ.get(
 
 SES_SENDER_EMAIL = os.environ["SES_SENDER_EMAIL"]
 
-# One address, or several separated by commas.
-SES_RECIPIENT_EMAILS = [
+# Recipients normally come from the S3 file at RECIPIENTS_S3_KEY (see
+# get_recipients() below), so the list can be updated without redeploying.
+# SES_RECIPIENT_EMAIL (one address, or several separated by commas) is kept
+# as a fallback for when that file doesn't exist yet.
+SES_RECIPIENT_EMAILS_ENV = [
     e.strip()
-    for e in os.environ["SES_RECIPIENT_EMAIL"].split(",")
+    for e in os.environ.get("SES_RECIPIENT_EMAIL", "").split(",")
     if e.strip()
 ]
+
+RECIPIENTS_S3_KEY = os.environ.get("RECIPIENTS_S3_KEY", "config/recipients.txt")
 
 # Optional: SES configuration set for delivery/bounce event tracking.
 SES_CONFIGURATION_SET = os.environ.get("SES_CONFIGURATION_SET", "")
@@ -263,6 +268,59 @@ def get_prompt(prompt_name):
         _PROMPT_CACHE[prompt_name] = response["Body"].read().decode("utf-8")
 
     return _PROMPT_CACHE[prompt_name]
+
+
+# ============================================================
+# S3 RECIPIENT LIST
+# ============================================================
+
+_RECIPIENTS_CACHE = None
+
+
+def get_recipients():
+    """
+    Report recipients: one email address per line in the S3 text file at
+    RECIPIENTS_S3_KEY (blank lines and lines starting with '#' are
+    ignored). Cached per container, like prompts, so the list can be
+    edited without redeploying. Falls back to SES_RECIPIENT_EMAIL if the
+    file doesn't exist or is empty.
+    """
+
+    global _RECIPIENTS_CACHE
+
+    if _RECIPIENTS_CACHE is not None:
+        return _RECIPIENTS_CACHE
+
+    recipients = []
+
+    try:
+        response = s3.get_object(Bucket=S3_BUCKET, Key=RECIPIENTS_S3_KEY)
+        body = response["Body"].read().decode("utf-8")
+        recipients = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+    except ClientError as e:
+        if e.response["Error"]["Code"] not in ("NoSuchKey", "404"):
+            raise
+        print(
+            f"No recipients file at s3://{S3_BUCKET}/{RECIPIENTS_S3_KEY}, "
+            "falling back to SES_RECIPIENT_EMAIL"
+        )
+
+    if not recipients:
+        recipients = SES_RECIPIENT_EMAILS_ENV
+
+    if not recipients:
+        raise RuntimeError(
+            "No email recipients configured: add addresses to "
+            f"s3://{S3_BUCKET}/{RECIPIENTS_S3_KEY} (one per line) or set "
+            "SES_RECIPIENT_EMAIL."
+        )
+
+    _RECIPIENTS_CACHE = recipients
+    return recipients
 
 
 # ============================================================
@@ -1091,6 +1149,7 @@ def send_report_email(
 
     print(f"Sending report email for {company}...")
 
+    recipients = get_recipients()
     key_facts = key_facts or []
     warnings = warnings or []
     date_tag = today_utc().strftime("%Y-%m-%d")
@@ -1108,7 +1167,7 @@ def send_report_email(
 
     message["Subject"] = subject
     message["From"] = SES_SENDER_EMAIL
-    message["To"] = ", ".join(SES_RECIPIENT_EMAILS)
+    message["To"] = ", ".join(recipients)
     message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(
         domain=SES_SENDER_EMAIL.split("@")[-1]
@@ -1136,7 +1195,7 @@ def send_report_email(
 
     send_args = {
         "Source": SES_SENDER_EMAIL,
-        "Destinations": SES_RECIPIENT_EMAILS,
+        "Destinations": recipients,
         "RawMessage": {"Data": message.as_bytes()},
     }
 

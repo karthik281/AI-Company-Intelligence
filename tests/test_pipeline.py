@@ -38,9 +38,13 @@ class FakeS3:
         self.objects = {
             "prompts/funding_classifier.md": b"Classify funding events.",
             "prompts/company_report.md": b"Write a company report.",
+            "config/recipients.txt": b"# recipients\nrao.kar@gmail.com\nsecond@example.com\n",
         }
 
     def get_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
         return {"Body": io.BytesIO(self.objects[Key])}
 
     def put_object(self, Bucket, Key, Body, ContentType):
@@ -274,8 +278,11 @@ fmt_prompt = research_bedrock.calls[1]["messages"][0]["content"][0]["text"]
 assert "[S1]" in fmt_prompt and "[S2, S3]" in fmt_prompt, fmt_prompt[:2000]
 
 # email
+assert ses.sent[0]["Destinations"] == ["rao.kar@gmail.com", "second@example.com"], \
+    ses.sent[0]["Destinations"]
 raw = ses.sent[0]["RawMessage"]["Data"]
 msg = email.message_from_bytes(raw)
+assert msg["To"] == "rao.kar@gmail.com, second@example.com", msg["To"]
 assert msg["Date"] and msg["Message-ID"]
 parts = [p.get_content_type() for p in msg.walk()]
 print("MIME parts:", parts)
