@@ -37,7 +37,7 @@ Status: Open | In progress | Done
 
 | Item | Why it mattered | Added | Done |
 |---|---|---|---|
-| Revoke the leftover Bedrock API key | The key removed from the research Lambda's env vars on 2026-10-02 was still live as an IAM service-specific credential (`bedrock.amazonaws.com`, user `BedrockAPIKey-wlbm`, set to expire in the year 2126 -- effectively permanent). Deleted via `aws iam delete-service-specific-credential`; the IAM user now has zero active credentials. | 2026-10-02 | 2026-10-02 |
+| Revoke the leftover Bedrock API key | The key removed from the research Lambda's env vars on 2026-10-02 was still live as an IAM service-specific credential (`bedrock.amazonaws.com`, user `BedrockAPIKey-wlbm`, set to expire in the year 2126 -- effectively permanent). Deleted via `aws iam delete-service-specific-credential`; the now-empty IAM user itself was then detached from `AmazonBedrockLimitedAccess` and deleted (`aws iam delete-user`) -- nothing of it remains. | 2026-10-02 | 2026-10-02 |
 
 See also HLD.md/LLD.md for what else was fixed in the same
 production-readiness pass: IAM least-privilege, log retention, S3
