@@ -1,3 +1,4 @@
 # Email report recipients, one address per line.
 # Lines starting with # and blank lines are ignored.
 rao.kar@gmail.com
+aayush.jain@leopathway.com
