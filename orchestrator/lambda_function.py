@@ -1197,21 +1197,43 @@ def send_report_email(
 
     message.attach(attachment)
 
-    send_args = {
-        "Source": SES_SENDER_EMAIL,
-        "Destinations": recipients,
-        "RawMessage": {"Data": message.as_bytes()},
-    }
+    # Send to each recipient separately: SES rejects a whole call if any
+    # one destination is unauthorized or unverified, which would otherwise
+    # block every other recipient too.
+    message_ids = []
+    failures = []
 
-    if SES_CONFIGURATION_SET:
-        send_args["ConfigurationSetName"] = SES_CONFIGURATION_SET
+    for recipient in recipients:
+        send_args = {
+            "Source": SES_SENDER_EMAIL,
+            "Destinations": [recipient],
+            "RawMessage": {"Data": message.as_bytes()},
+        }
 
-    response = ses.send_raw_email(**send_args)
+        if SES_CONFIGURATION_SET:
+            send_args["ConfigurationSetName"] = SES_CONFIGURATION_SET
 
-    print("Email accepted by SES.")
-    print(f"SES MessageId: {response.get('MessageId')}")
+        try:
+            response = ses.send_raw_email(**send_args)
+        except Exception as exc:
+            print(f"ERROR: email to {recipient} failed: {exc}")
+            failures.append((recipient, exc))
+            continue
 
-    return response.get("MessageId")
+        print(f"Email accepted by SES for {recipient}.")
+        print(f"SES MessageId: {response.get('MessageId')}")
+        message_ids.append(response.get("MessageId"))
+
+    if not message_ids:
+        raise failures[0][1]
+
+    if failures:
+        print(
+            "WARNING: report not delivered to: "
+            + ", ".join(r for r, _ in failures)
+        )
+
+    return message_ids[0]
 
 
 # ============================================================
