@@ -23,6 +23,8 @@ Status: Open | In progress | Done
 | Item | Why it matters | Added | Status |
 |---|---|---|---|
 | SES is still in sandbox mode | Only one address is verified. Any email added to `config/recipients.txt` beyond it will silently fail to deliver until it's individually verified or SES production access is requested. Explicitly deferred by the user on 2026-10-02. | 2026-10-02 | Open |
+| Sending from gmail.com fails DMARC alignment | Gmail shows an "impersonating your account" warning and other providers may spam-fold the mail. Needs a domain you own, verified in SES with DKIM; also required for SES production access. User has no domain yet (2026-10-12). | 2026-10-12 | Open |
+| Multi-user personalisation (v2) | See DESIGN_V2.md: profiles, per-user region/industry, one report per user/day, investor coverage, India-edition bias removed. | 2026-10-12 | In progress |
 | No alarm on the DLQ's depth | A twice-failed scheduled run now lands in `company-intelligence-dlq` (added 2026-10-02) instead of vanishing, but nothing currently alerts on `ApproximateNumberOfMessagesVisible` -- it has to be checked manually. | 2026-10-02 | Open |
 | No alerting on partial failures | The CloudWatch alarms added 2026-10-02 watch the Lambda `Errors` metric (hard crashes). A partial failure -- some companies succeed, one fails, HTTP 207 -- raises no alarm; it's only visible by reading the response body or logs. | 2026-10-02 | Open |
 
