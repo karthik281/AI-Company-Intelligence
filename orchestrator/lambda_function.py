@@ -1171,7 +1171,9 @@ def send_report_email(
 
     message["Subject"] = subject
     message["From"] = SES_SENDER_EMAIL
-    message["To"] = ", ".join(recipients)
+    # Newsletter style: recipients are blind-copied (envelope only), so
+    # the To header shows the sender and no one sees the list.
+    message["To"] = SES_SENDER_EMAIL
     message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(
         domain=SES_SENDER_EMAIL.split("@")[-1]

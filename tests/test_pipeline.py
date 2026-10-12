@@ -283,7 +283,8 @@ assert [s["Destinations"] for s in ses.sent[:2]] == [
 ], [s["Destinations"] for s in ses.sent]
 raw = ses.sent[0]["RawMessage"]["Data"]
 msg = email.message_from_bytes(raw)
-assert msg["To"] == "rao.kar@gmail.com, second@example.com", msg["To"]
+assert msg["To"] == msg["From"], msg["To"]
+assert b"second@example.com" not in raw
 assert msg["Date"] and msg["Message-ID"]
 parts = [p.get_content_type() for p in msg.walk()]
 print("MIME parts:", parts)
