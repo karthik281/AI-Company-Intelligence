@@ -2,18 +2,23 @@
 company-intelligence orchestrator
 
 Pipeline per run:
-  1. Fetch general AI funding news (Google News RSS)
-  2. Classify which articles are funding events (Bedrock)
-  3. For each event:
+  1. Load users (profiles: roles, regions, industries)
+  2. Fetch funding / investor news for the users' regions and industries
+     (Google News RSS)
+  3. Classify events and tag region, industry and kind (Bedrock)
+  4. Pick at most one unseen event per user (taxonomy.assign_events)
+  5. For each distinct chosen event:
        a. fetch company-specific news
        b. call the research Lambda (grounded research packet)
        c. verify sources, reconcile the event with research
        d. generate the Markdown report (Bedrock)
        e. save the Markdown report to S3
-       f. render a formatted PDF and email it via SES
-  4. Return a per-company summary
+       f. render a formatted PDF and email it via SES to the users it
+          was chosen for (each user is sent a separate message)
+  6. Return a per-company summary
 """
 
+import hashlib
 import json
 import os
 import re
@@ -32,6 +37,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from pdf_report import render_report_pdf
+import taxonomy
 
 
 # ============================================================
@@ -64,8 +70,26 @@ RECIPIENTS_S3_KEY = os.environ.get("RECIPIENTS_S3_KEY", "config/recipients.txt")
 # Optional: SES configuration set for delivery/bounce event tracking.
 SES_CONFIGURATION_SET = os.environ.get("SES_CONFIGURATION_SET", "")
 
-NEWS_QUERY = os.environ.get("NEWS_QUERY", "AI startup funding")
-GENERAL_NEWS_LIMIT = int(os.environ.get("GENERAL_NEWS_LIMIT", "5"))
+# Optional extra query for founders (kept from the single-query version).
+# Regional and industry queries are built from the users' profiles.
+NEWS_QUERY = os.environ.get("NEWS_QUERY", "")
+# Articles kept per news query.
+GENERAL_NEWS_LIMIT = int(os.environ.get("GENERAL_NEWS_LIMIT", "10"))
+# Upper bound on news queries per run (each is one RSS request).
+MAX_NEWS_QUERIES = int(os.environ.get("MAX_NEWS_QUERIES", "24"))
+CLASSIFIER_CHUNK = int(os.environ.get("CLASSIFIER_CHUNK", "25"))
+CLASSIFIER_MAX_TOKENS = int(os.environ.get("CLASSIFIER_MAX_TOKENS", "4000"))
+
+# Each user gets at most one report per day. This caps how many distinct
+# companies are researched per run (each costs a research call), however
+# many users there are.
+MAX_ITEMS_PER_RUN = int(os.environ.get("MAX_ITEMS_PER_RUN", "10"))
+
+# User profiles: DynamoDB table if USERS_TABLE is set, else the S3 JSON
+# file at USERS_S3_KEY, else the recipients list (every address becomes a
+# founder+investor user interested in everything).
+USERS_TABLE = os.environ.get("USERS_TABLE", "")
+USERS_S3_KEY = os.environ.get("USERS_S3_KEY", "config/users.json")
 COMPANY_NEWS_LIMIT = int(os.environ.get("COMPANY_NEWS_LIMIT", "10"))
 
 REPORT_PREFIX = os.environ.get("REPORT_PREFIX", "reports").strip("/")
@@ -328,14 +352,107 @@ def get_recipients():
 
 
 # ============================================================
+# USERS AND PER-USER HISTORY
+# ============================================================
+
+def _load_users_from_dynamodb():
+
+    from boto3.dynamodb.types import TypeDeserializer
+
+    client = boto3.client("dynamodb")
+    deserialise = TypeDeserializer().deserialize
+    users = []
+    kwargs = {"TableName": USERS_TABLE}
+
+    while True:
+        page = client.scan(**kwargs)
+        for item in page.get("Items", []):
+            users.append({k: deserialise(v) for k, v in item.items()})
+        if not page.get("LastEvaluatedKey"):
+            break
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+    return users
+
+
+def get_users():
+    """
+    Normalised user profiles (see taxonomy.normalise_profile). Sources, in
+    order: DynamoDB table, S3 JSON list, then the recipients list.
+    """
+
+    raw = None
+
+    if USERS_TABLE:
+        raw = _load_users_from_dynamodb()
+
+    else:
+        try:
+            body = s3.get_object(Bucket=S3_BUCKET, Key=USERS_S3_KEY)["Body"]
+            raw = json.loads(body.read().decode("utf-8"))
+        except ClientError as e:
+            if e.response["Error"]["Code"] not in (
+                "NoSuchKey", "404", "AccessDenied"
+            ):
+                raise
+
+    if not raw:
+        raw = [
+            {"email": e, "roles": taxonomy.ALL_ROLES}
+            for e in get_recipients()
+        ]
+
+    users = {}
+    for item in raw:
+        profile = taxonomy.normalise_profile(item)
+        if profile["email"] and "@" in profile["email"]:
+            users[profile["email"]] = profile
+
+    return [u for u in users.values() if u["active"]]
+
+
+def sent_log_key(email):
+    digest = hashlib.sha256(email.strip().lower().encode()).hexdigest()[:24]
+    return f"state/sent/{digest}.json"
+
+
+def load_sent(email):
+    """Event keys already emailed to this user."""
+
+    try:
+        body = s3.get_object(Bucket=S3_BUCKET, Key=sent_log_key(email))["Body"]
+        return set(json.loads(body.read().decode("utf-8")).get("sent", []))
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            return set()
+        raise
+
+
+def record_sent(email, key):
+
+    sent = sorted(load_sent(email) | {key})
+
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=sent_log_key(email),
+        Body=json.dumps({"sent": sent}).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+# ============================================================
 # NEWS (GOOGLE NEWS RSS)
 # ============================================================
 
 def fetch_rss(query, limit):
 
+    # Fixed US edition: with no edition given, Google News follows the
+    # caller's location (India, for a Lambda in Mumbai) and biases results.
+    # Regional coverage comes from region words in the query instead.
     url = (
         "https://news.google.com/rss/search?q="
         + quote(query)
+        + "&hl=en-US&gl=US&ceid=US:en"
     )
 
     request = urllib.request.Request(
@@ -369,9 +486,101 @@ def fetch_rss(query, limit):
     return articles
 
 
-def get_news():
-    """General funding news."""
-    return fetch_rss(NEWS_QUERY, GENERAL_NEWS_LIMIT)
+def build_news_queries(users):
+    """
+    News queries for this run, from what the users asked for: founders get
+    startup-round queries per region and per industry, investors get
+    investor-activity queries per region. The three lists are interleaved
+    so the MAX_NEWS_QUERIES cap trims evenly, not one list entirely.
+    """
+
+    wants_startup = any(
+        taxonomy.user_wants_kind(u, taxonomy.KIND_STARTUP) for u in users
+    )
+    wants_investor = any(
+        taxonomy.user_wants_kind(u, taxonomy.KIND_INVESTOR) for u in users
+    )
+
+    regions = [
+        r for r in taxonomy.ALL_REGIONS
+        if r != taxonomy.GLOBAL_REGION
+        and any(r in u["regions"] for u in users)
+    ]
+    industries = [
+        i for i in taxonomy.ALL_INDUSTRIES
+        if i != taxonomy.OTHER_INDUSTRY
+        and any(i in u["industries"] for u in users)
+    ]
+
+    startup_regions = []
+    startup_industries = []
+    investor_queries = []
+
+    if wants_startup:
+        startup_regions = [taxonomy.STARTUP_QUERY] + [
+            f"{taxonomy.STARTUP_QUERY} ({taxonomy.REGIONS[r]})"
+            for r in regions
+        ]
+        startup_industries = [
+            f"{taxonomy.STARTUP_QUERY} ({taxonomy.INDUSTRIES[i]})"
+            for i in industries
+        ]
+        if NEWS_QUERY:
+            startup_regions.insert(0, NEWS_QUERY)
+
+    if wants_investor:
+        investor_queries = [taxonomy.INVESTOR_QUERY] + [
+            f"{taxonomy.INVESTOR_QUERY} ({taxonomy.REGIONS[r]})"
+            for r in regions
+        ]
+
+    lists = [startup_regions, investor_queries, startup_industries]
+    queries = []
+
+    for position in range(max(len(q) for q in lists)):
+        for items in lists:
+            if position < len(items) and items[position] not in queries:
+                queries.append(items[position])
+
+    return queries[:MAX_NEWS_QUERIES]
+
+
+def get_news(users=None):
+    """
+    General funding / investor news. With users, runs the per-profile
+    queries; without, the single legacy query. One failing query does not
+    stop the run. Articles are de-duplicated by URL and then title.
+    """
+
+    if users is None:
+        queries = [NEWS_QUERY or taxonomy.STARTUP_QUERY]
+    else:
+        queries = build_news_queries(users)
+
+    articles = []
+    seen = set()
+
+    for query in queries:
+
+        try:
+            fetched = fetch_rss(query, GENERAL_NEWS_LIMIT)
+        except Exception as e:
+            print(f"WARNING: news query failed ({query[:60]}): {e}")
+            continue
+
+        for article in fetched:
+
+            ident = article.get("url") or article.get("title")
+
+            if ident in seen:
+                continue
+
+            seen.add(ident)
+            articles.append(article)
+
+    print(f"News queries: {len(queries)}; unique articles: {len(articles)}")
+
+    return articles
 
 
 def get_company_news(company):
@@ -385,23 +594,42 @@ def get_company_news(company):
 # ============================================================
 
 def classify_articles(articles):
+    """
+    Classify articles into events, in chunks so a large pool does not
+    overflow the model's output. Each event is tagged with region,
+    industry and kind (see taxonomy.normalise_event_tags).
+    """
 
     prompt_template = get_prompt("funding_classifier.md")
 
-    prompt = (
-        prompt_template
-        + "\n\nARTICLES:\n"
-        + json.dumps(articles, indent=2, ensure_ascii=False)
-    )
+    events = []
 
-    result, stop_reason = ask_bedrock(prompt, 2000, "classifier")
+    for start in range(0, len(articles), CLASSIFIER_CHUNK):
 
-    if stop_reason == "max_tokens":
-        raise ValueError(
-            "Classifier output was truncated; raise its maxTokens"
+        chunk = articles[start:start + CLASSIFIER_CHUNK]
+
+        prompt = (
+            prompt_template
+            + "\n\nARTICLES:\n"
+            + json.dumps(chunk, indent=2, ensure_ascii=False)
         )
 
-    return extract_json_object(result)
+        result, stop_reason = ask_bedrock(
+            prompt, CLASSIFIER_MAX_TOKENS, "classifier"
+        )
+
+        if stop_reason == "max_tokens":
+            raise ValueError(
+                "Classifier output was truncated; raise CLASSIFIER_MAX_TOKENS "
+                "or lower CLASSIFIER_CHUNK"
+            )
+
+        parsed = extract_json_object(result)
+
+        for event in parsed.get("events", []) or []:
+            events.append(taxonomy.normalise_event_tags(event))
+
+    return {"events": events}
 
 
 # ============================================================
@@ -553,13 +781,14 @@ def validate_research_sources(research_packet, grounded_sources):
     return problems
 
 
-def get_web_research(company, company_articles):
+def get_web_research(company, company_articles, kind=None):
 
     print(f"Calling research Lambda for: {company}")
 
     payload = {
         "company": company,
         "news_articles": company_articles,
+        "kind": kind or taxonomy.KIND_STARTUP,
     }
 
     response = research_lambda.invoke(
@@ -868,9 +1097,27 @@ OUTPUT FORMAT (the report is rendered to PDF)
 """
 
 
+def get_report_prompt(kind):
+    """Investor items use investor_report.md; fall back to the company
+    prompt until that file has been pushed to S3."""
+
+    if kind == taxonomy.KIND_INVESTOR:
+        try:
+            return get_prompt("investor_report.md")
+        except ClientError as e:
+            if e.response["Error"]["Code"] not in ("NoSuchKey", "404"):
+                raise
+            print(
+                "WARNING: prompts/investor_report.md not found in S3; "
+                "using company_report.md"
+            )
+
+    return get_prompt("company_report.md")
+
+
 def generate_report(company, event, articles, web_research):
 
-    prompt_template = get_prompt("company_report.md")
+    prompt_template = get_report_prompt(event.get("kind"))
 
     research_packet = web_research.get("research_packet", {})
     sources = web_research.get("sources", [])
@@ -1149,16 +1396,27 @@ def send_report_email(
     pdf_bytes=None,
     key_facts=None,
     warnings=None,
+    recipients=None,
+    kind=None,
+    delivered=None,
 ):
+    """
+    Email the report to each recipient separately. Addresses that SES
+    accepted are appended to `delivered` (if given) so the caller can
+    record who actually got it.
+    """
 
     print(f"Sending report email for {company}...")
 
-    recipients = get_recipients()
+    recipients = recipients or get_recipients()
     key_facts = key_facts or []
     warnings = warnings or []
     date_tag = today_utc().strftime("%Y-%m-%d")
 
-    subject = f"Company Intelligence Report - {company}"
+    if kind == taxonomy.KIND_INVESTOR:
+        subject = f"Investor Intelligence Report - {company}"
+    else:
+        subject = f"Company Intelligence Report - {company}"
 
     if any("web search" in w for w in warnings):
         subject += " (unverified sources)"
@@ -1222,6 +1480,9 @@ def send_report_email(
             failures.append((recipient, exc))
             continue
 
+        if delivered is not None:
+            delivered.append(recipient)
+
         print(f"Email accepted by SES for {recipient}.")
         print(f"SES MessageId: {response.get('MessageId')}")
         message_ids.append(response.get("MessageId"))
@@ -1242,7 +1503,7 @@ def send_report_email(
 # MAIN LAMBDA HANDLER
 # ============================================================
 
-def process_event(funding_event, general_articles, run_time):
+def process_event(funding_event, general_articles, run_time, recipients=None):
     """Research, report, store and email one funding event."""
 
     company = funding_event["company"]
@@ -1253,7 +1514,9 @@ def process_event(funding_event, general_articles, run_time):
     print(f"Found {len(company_articles)} company-specific articles")
 
     # Web research
-    web_research = get_web_research(company, company_articles)
+    web_research = get_web_research(
+        company, company_articles, funding_event.get("kind")
+    )
     research_packet = web_research["research_packet"]
 
     # Reconcile the classifier's event with research findings
@@ -1291,6 +1554,7 @@ def process_event(funding_event, general_articles, run_time):
         print(f"PDF saved: s3://{S3_BUCKET}/{pdf_key}")
 
     # Email
+    delivered = []
     email_message_id = send_report_email(
         company,
         report,
@@ -1298,6 +1562,9 @@ def process_event(funding_event, general_articles, run_time):
         pdf_bytes=pdf_bytes,
         key_facts=key_facts,
         warnings=warnings,
+        recipients=recipients,
+        kind=funding_event.get("kind"),
+        delivered=delivered,
     )
 
     if DEDUPE_EVENTS:
@@ -1314,6 +1581,7 @@ def process_event(funding_event, general_articles, run_time):
         "s3_key": s3_key,
         "pdf_s3_key": pdf_key,
         "email_sent": True,
+        "delivered_to": delivered,
         "email_attachment": "pdf" if pdf_bytes is not None else "markdown",
         "email_message_id": email_message_id,
         "web_research_sources": web_research["grounded_source_count"],
@@ -1335,17 +1603,21 @@ def lambda_handler(event, context):
     event = event or {}
     run_time = today_utc()
 
-    # Test events can set {"force": true} to ignore de-duplication.
+    # Test events can set {"force": true} to ignore de-duplication and the
+    # per-user "already sent" history.
     force = bool(event.get("force"))
 
     print("Starting company intelligence pipeline...")
 
-    print("Fetching general funding news...")
-    articles = get_news()
+    users = get_users()
+    print(f"Users: {len(users)}")
+
+    print("Fetching general funding / investor news...")
+    articles = get_news(users)
     print(f"Fetched {len(articles)} general articles")
 
     print("Classifying articles...")
-    classification = classify_articles(articles)
+    classification = classify_articles(articles) if articles else {"events": []}
     events = classification.get("events", []) or []
 
     if not events:
@@ -1360,7 +1632,8 @@ def lambda_handler(event, context):
 
     print(f"Found {len(events)} relevant funding events")
 
-    reports = []
+    # One entry per company, and (optionally) none already reported.
+    candidates = []
     skipped = []
     seen_companies = set()
 
@@ -1384,14 +1657,53 @@ def lambda_handler(event, context):
             skipped.append(company)
             continue
 
+        candidates.append(funding_event)
+
+    sent_by_user = {
+        u["email"]: (set() if force else load_sent(u["email"]))
+        for u in users
+    }
+
+    assignments = taxonomy.assign_events(
+        users, candidates, sent_by_user, MAX_ITEMS_PER_RUN
+    )
+
+    unmatched = [u["email"] for u in users if u["email"] not in assignments]
+    print(
+        f"Matched {len(assignments)} of {len(users)} users; "
+        f"{len(unmatched)} had no new match today"
+    )
+
+    # Group users by the event chosen for them: one report per event.
+    by_event = {}
+    for email_address, chosen in assignments.items():
+        by_event.setdefault(taxonomy.event_key(chosen), (chosen, []))[1].append(
+            email_address
+        )
+
+    reports = []
+
+    for funding_event, recipients in by_event.values():
+
+        company = funding_event["company"]
+
         print("==========================================")
-        print(f"Processing company: {company}")
+        print(f"Processing company: {company} ({len(recipients)} users)")
         print("==========================================")
 
         try:
-            reports.append(
-                process_event(funding_event, articles, run_time)
+            result = process_event(
+                funding_event, articles, run_time, recipients
             )
+            reports.append(result)
+
+            key = taxonomy.event_key(funding_event)
+
+            for address in result.get("delivered_to", []):
+                record_sent(address, key)
+
+            if DEDUPE_EVENTS and result.get("delivered_to"):
+                mark_reported(funding_event, result["s3_key"])
 
         except Exception as e:
 
@@ -1435,6 +1747,12 @@ def lambda_handler(event, context):
             "reports_created": len(succeeded),
             "reports_failed": len(failed),
             "skipped_already_reported": skipped,
+            "users": len(users),
+            "users_without_match": unmatched,
+            "assignments": {
+                address: chosen["company"]
+                for address, chosen in assignments.items()
+            },
             "reports": reports,
         }, ensure_ascii=False),
     }

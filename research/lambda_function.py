@@ -418,7 +418,22 @@ Use multiple sources for major claims where possible.
 # STEP 1: GROUNDED RESEARCH NOTES
 # ============================================================
 
-def build_research_prompt(company, news_articles, retry=False):
+INVESTOR_SUBJECT_NOTE = """
+SUBJECT TYPE: INVESTOR / FUND
+=============================
+The subject is an investor (VC, PE, angel network, corporate fund or
+similar), not a startup. Keep the headings below but read them this way:
+- Executive facts: what the investor is, fund size or AUM, stage and
+  geography focus, headquarters, key partners.
+- Customers: notable portfolio companies and recent investments.
+- Technology: investment thesis and sectors of focus.
+- Funding: the investor's own fund raises (date, fund, size, LPs) and the
+  deals it recently led or joined (company, round, amount).
+- Competitors: peer funds with overlapping focus.
+"""
+
+
+def build_research_prompt(company, news_articles, retry=False, kind=None):
 
     news_context = json.dumps(news_articles, indent=2, ensure_ascii=False)
 
@@ -436,6 +451,8 @@ complete notes this time, keeping each bullet short. Search the web as
 needed. Do not stop until every section below has been written.
 """
 
+    subject_note = INVESTOR_SUBJECT_NOTE if kind == "investor_activity" else ""
+
     return f"""
 You are the research engine for a professional company-intelligence
 system.
@@ -447,7 +464,7 @@ COMPANY
 INITIAL GOOGLE NEWS CONTEXT
 ===========================
 {news_context}
-
+{subject_note}
 Use Web Grounding extensively. The Google News material is only an
 initial lead. Do NOT assume it is accurate.
 
@@ -492,9 +509,9 @@ IMPORTANT:
 """
 
 
-def call_nova_grounded(company, news_articles, retry=False):
+def call_nova_grounded(company, news_articles, retry=False, kind=None):
 
-    prompt = build_research_prompt(company, news_articles, retry)
+    prompt = build_research_prompt(company, news_articles, retry, kind)
 
     print(
         "Calling Nova Web Grounding"
@@ -533,10 +550,10 @@ def call_nova_grounded(company, news_articles, retry=False):
     return grounded
 
 
-def research_notes(company, news_articles):
+def research_notes(company, news_articles, kind=None):
     """Grounded notes, retried once if they came back unusably short."""
 
-    grounded = call_nova_grounded(company, news_articles)
+    grounded = call_nova_grounded(company, news_articles, kind=kind)
 
     too_short = len(grounded["text"]) < MIN_NOTES_CHARS
 
@@ -548,7 +565,9 @@ def research_notes(company, news_articles):
             f"stopReason {grounded['stop_reason']}). Retrying once."
         )
 
-        retry = call_nova_grounded(company, news_articles, retry=True)
+        retry = call_nova_grounded(
+            company, news_articles, retry=True, kind=kind
+        )
 
         # Keep whichever attempt produced more usable material.
         if len(retry["text"]) > len(grounded["text"]):
@@ -841,9 +860,9 @@ def attach_source_urls(packet, sources):
 # RESEARCH COMPANY
 # ============================================================
 
-def research_company(company, news_articles):
+def research_company(company, news_articles, kind=None):
 
-    grounded = research_notes(company, news_articles)
+    grounded = research_notes(company, news_articles, kind)
 
     sources = grounded["sources"]
 
@@ -903,13 +922,14 @@ def lambda_handler(event, context):
 
     company = str(company).strip()
     news_articles = event.get("news_articles", [])
+    kind = event.get("kind")
 
     print(f"Researching company: {company}")
     print(f"Google News articles received: {len(news_articles)}")
 
     try:
 
-        result = research_company(company, news_articles)
+        result = research_company(company, news_articles, kind)
 
         packet = result["packet"]
 

@@ -48,7 +48,8 @@ pip install --quiet \
   --only-binary=:all: \
   -r "$HERE/orchestrator/requirements.txt"
 cp "$HERE/orchestrator/lambda_function.py" \
-   "$HERE/orchestrator/pdf_report.py" "$BUILD/orchestrator/"
+   "$HERE/orchestrator/pdf_report.py" \
+   "$HERE/orchestrator/taxonomy.py" "$BUILD/orchestrator/"
 cp -r "$HERE/orchestrator/fonts" "$BUILD/orchestrator/"
 find "$BUILD/orchestrator" -name "__pycache__" -type d -prune -exec rm -rf {} +
 zip_dir "$BUILD/orchestrator" "$DIST/orchestrator.zip"
