@@ -4,6 +4,7 @@
 #   scripts/deploy.sh               # both
 #   scripts/deploy.sh orchestrator  # Mumbai only
 #   scripts/deploy.sh research      # Oregon only
+#   scripts/deploy.sh api           # profile API (Mumbai) only
 
 set -euo pipefail
 
@@ -42,4 +43,11 @@ fi
 
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "research" ]; then
   deploy "$RESEARCH_FUNCTION" "$RESEARCH_REGION" "$ROOT/dist/research.zip"
+fi
+
+# The profile API only exists once scripts/setup_v2.sh has created it, so
+# "all" deploys it only if that function is there.
+API_FN="${API_FUNCTION:-dawnbrief-profile-api}"
+if [ "$TARGET" = "api" ] || { [ "$TARGET" = "all" ] &&   aws lambda get-function --function-name "$API_FN"     --region "$ORCH_REGION" >/dev/null 2>&1; }; then
+  deploy "$API_FN" "$ORCH_REGION" "$ROOT/dist/api.zip"
 fi

@@ -4,7 +4,7 @@
 #   ./build.sh            # x86_64 (Lambda default)
 #   ./build.sh arm64      # if your functions use Graviton (arm64)
 #
-# Output: dist/orchestrator.zip, dist/research.zip
+# Output: dist/orchestrator.zip, dist/research.zip, dist/api.zip
 # Python version must match the Lambda runtime (3.14 per your logs).
 
 set -euo pipefail
@@ -58,6 +58,11 @@ echo "Building research Lambda (no extra dependencies)"
 mkdir -p "$BUILD/research"
 cp "$HERE/research/lambda_function.py" "$BUILD/research/"
 zip_dir "$BUILD/research" "$DIST/research.zip"
+
+echo "Building profile API Lambda (boto3 only; shares taxonomy.py)"
+mkdir -p "$BUILD/api"
+cp "$HERE/api/lambda_function.py" "$HERE/orchestrator/taxonomy.py" "$BUILD/api/"
+zip_dir "$BUILD/api" "$DIST/api.zip"
 
 rm -rf "$BUILD"
 ls -lh "$DIST"

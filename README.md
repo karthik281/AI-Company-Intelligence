@@ -1,21 +1,29 @@
 # Company Intelligence Pipeline
 
-Finds AI startup funding news, researches each company with grounded web
-search, writes a detailed report, saves it to S3 and emails it as a PDF.
+**Dawnbrief**: finds startup funding and investor news for the regions and
+industries each user follows, researches one company or investor per user per
+day with grounded web search, and emails a detailed PDF brief. Users register
+on a website and choose their role (founder, investor, or both), regions and
+industries. Design: `DESIGN_V2.md`. Operator checklist: `TODO.md`. Costs:
+`COSTS.md`.
 
 ## How it works
 
 ```
-Google News RSS ─> classify funding events (Bedrock)
-                 └> per company:
-                      company news ─> research Lambda (Oregon, Nova grounding)
-                      ─> report (Bedrock) ─> S3 (.md) ─> PDF ─> SES email
+users (DynamoDB) ─> news queries per region/industry (Google News RSS)
+  ─> classify events + tag kind/region/industry (Bedrock)
+  ─> pick one unseen event per user
+  └> per distinct event:
+       company news ─> research Lambda (Oregon, Nova grounding)
+       ─> report (Bedrock) ─> S3 (.md) ─> PDF ─> SES email to each user
 ```
 
 | Part | Where | Code |
 |---|---|---|
 | Orchestrator | Lambda, ap-south-1 (Mumbai) | `orchestrator/` |
 | Research | Lambda, us-west-2 (Oregon) | `research/` |
+| Profile API | Lambda + HTTP API + Cognito, ap-south-1 | `api/`, `orchestrator/taxonomy.py` |
+| Website | S3 + CloudFront | `site/` |
 | Prompts | `s3://company-intelligence-2026/prompts/` | `prompts/` |
 | Reports | `s3://company-intelligence-2026/reports/YYYY-MM-DD/` | generated |
 
@@ -34,6 +42,9 @@ Requires the AWS CLI, configured with access to both Lambdas and the bucket.
 | Change | Command |
 |---|---|
 | Orchestrator code | `scripts/deploy.sh orchestrator` |
+| Profile API code | `scripts/deploy.sh api` |
+| Website only | `scripts/setup_v2.sh --site-only` |
+| First-time v2 AWS setup | `scripts/setup_v2.sh` (see TODO.md for the order) |
 | Research code | `scripts/deploy.sh research` |
 | Prompts | `scripts/push_prompts.sh` |
 | Recipient list | `scripts/push_recipients.sh` |
@@ -57,8 +68,13 @@ business-logic functions in each Lambda and in `pdf_report.py`.
 | `SES_RECIPIENT_EMAIL` | required | Recipient(s), comma-separated |
 | `RESEARCH_LAMBDA_NAME` | `company-intelligence-web-research` | Research function |
 | `RESEARCH_LAMBDA_REGION` | `us-west-2` | Research region |
-| `NEWS_QUERY` | `AI startup funding` | Google News search |
-| `GENERAL_NEWS_LIMIT` | `5` | Headlines checked per run |
+| `USERS_TABLE` | empty | DynamoDB users table; empty = `config/users.json`, then `recipients.txt` |
+| `MAX_ITEMS_PER_RUN` | `10` | Distinct companies researched per run (cost cap) |
+| `MAX_NEWS_QUERIES` | `24` | News queries per run |
+| `CLASSIFIER_CHUNK` | `25` | Articles per classifier call |
+| `CLASSIFIER_MAX_TOKENS` | `4000` | Classifier output budget per call |
+| `NEWS_QUERY` | empty | Optional extra founder query |
+| `GENERAL_NEWS_LIMIT` | `10` | Headlines kept per news query |
 | `COMPANY_NEWS_LIMIT` | `10` | Articles per company |
 | `REPORT_MAX_TOKENS` | `7000` | Report length budget |
 | `INCLUDE_RESEARCH_APPENDIX` | `true` | Evidence tables in the PDF |
@@ -84,4 +100,9 @@ Both run Python 3.14.
 
 - Sending from a gmail.com address through SES fails DMARC; mail may land
   in spam. Fix: send from a domain you own.
-- Google News edition follows the caller's location (India for Mumbai).
+- Fixed: the Google News edition no longer follows the Lambda's location
+  (it was India for Mumbai). Queries use the US edition plus region words.
+- SES is sandboxed: only verified addresses receive mail, so public signup
+  cannot deliver until SES production access (needs a domain).
+- One orchestrator run is sequential; see HLD section 7 for the scale
+  ceiling and BACKLOG.md for the fan-out item.

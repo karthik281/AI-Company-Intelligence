@@ -2,24 +2,41 @@
 
 ## 1. Purpose
 
-Once a day, the pipeline scans AI-startup funding news, picks out genuine
-funding events, researches each company with grounded web search, writes a
-detailed report, and emails it as a PDF. It runs unattended on a schedule;
-a human only looks at the email (or the stored reports) and occasionally
-tunes the prompts or recipient list.
+**Dawnbrief** (the product name from v2) sends each registered user one
+deeply researched brief per day. Once a day, the pipeline scans funding and
+investor news for the regions and industries its users follow, picks out
+genuine events, matches at most one unseen event to each user, researches
+each chosen company or investor with grounded web search, writes a detailed
+report, and emails it as a PDF. It runs unattended on a schedule; users
+manage their own profile on a website; an operator occasionally tunes the
+prompts. See DESIGN_V2.md for the v2 design and its rationale.
+
+Status: the pipeline code (phase 1) and the profile API / website code
+(phases 2-3) are written and tested. The AWS resources for phases 2-3 are
+created by `scripts/setup_v2.sh` (see TODO.md) and are **not yet deployed**;
+until then production runs the previous single-recipient-list behaviour.
 
 ## 2. Architecture
 
 ```
-EventBridge Scheduler (cron, daily 06:00 IST)
-        │  invokes, with retries + DLQ on failure
-        ▼
-Orchestrator Lambda (ap-south-1 / Mumbai)
+Website (S3 + CloudFront) ─► Cognito sign-in ─► HTTP API ─► Profile Lambda
+                                                       │
+                                                       ▼
+                                            DynamoDB `dawnbrief-users`
+                                  (email, roles, regions, industries, active)
+                                                       │ scanned daily
+EventBridge Scheduler (cron, daily 06:00 IST)          │
+        │  invokes, with retries + DLQ on failure      │
+        ▼                                              ▼
+Orchestrator Lambda (ap-south-1 / Mumbai) ◄── users and profiles
         │
-        ├─ Google News RSS ──────────────────► classify via Bedrock
-        │                                        (funding events?)
+        ├─ Google News RSS (fixed US edition; region/industry terms
+        │   built from the users' profiles) ──► classify via Bedrock
+        │                          (kind, region, industry per event)
+        ├─ assign at most ONE unseen event per user (shared events
+        │   preferred, capped at MAX_ITEMS_PER_RUN distinct companies)
         │
-        ├─ per funding event ─────────────────► Research Lambda
+        ├─ per distinct chosen event ─────────► Research Lambda
         │                                        (us-west-2 / Oregon)
         │                                             │
         │                                             ├─ Nova + web grounding
@@ -32,7 +49,8 @@ Orchestrator Lambda (ap-south-1 / Mumbai)
         ├─ reconcile event with research, generate report (Bedrock)
         ├─ render PDF (pure Python: markdown + reportlab)
         ├─ save Markdown (+ optionally PDF) to S3
-        └─ email the PDF via SES
+        └─ email the PDF via SES, one message per user, then record it in
+           that user's history (S3 `state/sent/`)
 ```
 
 Supporting AWS resources: an S3 bucket for prompts, the recipient list,
@@ -87,6 +105,24 @@ report URLs must come from grounding citations, never model-typed text.
   controls whether an S3 marker (`state/reported/<company>__<round>.json`)
   is checked/written, so the same funding event isn't reported twice
   across daily runs.
+- **One report per user per day, chosen by profile** - roles decide the
+  kind of event (founders: `startup_round`; investors: `investor_activity`;
+  both: either), then region and industry must match the user's choices.
+  Events the classifier could not tag match everyone rather than being
+  dropped. Many users with overlapping interests share one research run, so
+  cost scales with distinct companies per day, not with users.
+- **Region comes from the profile, not from where the Lambda runs** - the
+  Google News edition is pinned to US English and regional coverage comes
+  from region words in the query. (Previously the Mumbai Lambda silently
+  produced the India edition.)
+- **Investor coverage reuses the research contract** - an investor or fund
+  is researched through the same Lambda and packet shape with a `kind`
+  hint that re-reads the headings (customers = portfolio, technology =
+  thesis, funding = fund raises and deals); only the report prompt differs.
+- **Email is sent per recipient** - SES rejects a whole call if any one
+  destination is unauthorised or unverified, so addresses are never batched
+  and one bad address cannot block the others. `To` shows the sender, so
+  recipients never see each other (newsletter style).
 - **Per-company failure isolation** - one company's research/report/email
   failure is caught, logged, and recorded in the response; it doesn't stop
   the rest of that day's events from being processed. The handler also
@@ -102,10 +138,17 @@ report URLs must come from grounding citations, never model-typed text.
 | Reliability | EventBridge Scheduler retries a failed run twice before sending it to an SQS dead-letter queue, so a bad day doesn't just vanish. |
 | Observability | CloudWatch alarms on both Lambdas' `Errors` metric notify an SNS topic (email) in each region. Logs retain 30 days. |
 | Data durability | The reports bucket has versioning on (an overwrite is recoverable) and a lifecycle rule that expires old versions after 90 days rather than growing forever. |
-| Email deliverability | SES is still in **sandbox mode** - only the one verified sender/recipient address can receive mail. Adding more recipients to `recipients.txt` requires verifying each address (or requesting SES production access) first. |
+| Email deliverability | SES is still in **sandbox mode** - only verified addresses can receive mail, so public signup cannot deliver until SES production access is granted (which needs a sending domain). The profile API asks SES to verify each new user's address as a stopgap. Sending from a gmail.com address also fails DMARC alignment (Gmail shows an impersonation warning); a domain you own, verified with DKIM, fixes both. |
+| Authentication | Cognito user pool (email/username + password; Google can be added), PKCE code flow from the site, API Gateway JWT authorizer. The profile API reads the caller's email from verified token claims only - never from the request body. |
 
 ## 7. Known limitations / deliberate non-goals
 
+- **Scale ceiling of the single orchestrator Lambda.** Distinct companies
+  are researched sequentially (about 1-2.5 minutes each) and emails are sent
+  one at a time within a 15-minute invocation. That is fine up to roughly
+  5-8 companies and a few hundred users per run; beyond that the run must
+  fan out (SQS or Step Functions: one message per company, one per batch of
+  recipients). Tracked in BACKLOG.md.
 - No VPC, no provisioned/reserved concurrency, no X-Ray tracing - the
   workload is a single daily batch job, not a latency-sensitive service.
 - The CloudWatch alarms watch the Lambda `Errors` metric (unhandled
