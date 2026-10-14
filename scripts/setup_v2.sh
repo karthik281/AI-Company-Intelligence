@@ -186,6 +186,7 @@ ensure_cognito() {
     POOL_ID="$(aws cognito-idp create-user-pool --pool-name "$POOL_NAME" --region "$REGION" \
       --alias-attributes email preferred_username \
       --auto-verified-attributes email \
+      --schema Name=email,Required=true,Mutable=true \
       --username-configuration CaseSensitive=false \
       --policies "PasswordPolicy={MinimumLength=10,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=false}" \
       --account-recovery-setting "RecoveryMechanisms=[{Priority=1,Name=verified_email}]" \
