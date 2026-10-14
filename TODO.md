@@ -92,10 +92,7 @@ yet).
 - [ ] **C1. Check your AWS credits** (Billing > Credits): balance and expiry.
       The last 30 days of usage ($62 at list price) were fully covered by
       credits.
-- [ ] **C2. Decide about the FlightSearch resources**: two VPC interface
-      endpoints, a Redis `cache.t4g.micro` and a WAF, about $57 a month, which
-      is about 92% of the account's spend and not part of Dawnbrief. Keep or
-      delete; I did not touch them.
+- [x] **C2. FlightSearch stack deleted on 2026-10-14** (at your request, no backups taken): Lambdas, REST/HTTP APIs, CloudFront, WAF, Redis, VPC endpoints, VPC, three DynamoDB tables and roles. Saves about $57 a month.
 - [ ] **C3. Create an AWS Budget (about $25 a month) with an email alert** and
       turn on Cost Anomaly Detection (free).
 - [ ] **C4. Review COSTS.md section 3** and tell me which optimisations to do
