@@ -89,7 +89,7 @@ ensure_distribution() {
     "AllowedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
     "Compress": true,
     "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
-    "ResponseHeadersPolicyId": "67f7725c-6f97-4210-82d7-5512b698c20c"
+    "ResponseHeadersPolicyId": "67f7725c-6f97-4210-82d7-5512b31e9d03"
   }
 }
 EOF
@@ -115,9 +115,9 @@ EOF
 
 publish_site() {
   say "Publishing site/ to $SITE_URL"
-  aws s3 sync "$ROOT/site/" "s3://$SITE_BUCKET/" --region "$REGION" --delete \
+  aws s3 sync "$(wp "$ROOT/site")/" "s3://$SITE_BUCKET/" --region "$REGION" --delete \
     --exclude "config.js" --cache-control "public, max-age=300"
-  aws s3 cp "$TMP/config.js" "s3://$SITE_BUCKET/config.js" --region "$REGION" \
+  aws s3 cp "$(wp "$TMP/config.js")" "s3://$SITE_BUCKET/config.js" --region "$REGION" \
     --content-type "application/javascript" --cache-control "no-cache"
   aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*" >/dev/null
 }
@@ -209,7 +209,6 @@ ensure_cognito() {
   CLIENT_ID="$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" --region "$REGION" \
     --query "UserPoolClients[?ClientName=='$NAME-web'].ClientId | [0]" --output text)"
   CLIENT_ARGS=(--user-pool-id "$POOL_ID" --region "$REGION" --client-name "$NAME-web"
-    --no-generate-secret
     --allowed-o-auth-flows code --allowed-o-auth-flows-user-pool-client
     --allowed-o-auth-scopes openid email profile
     --supported-identity-providers COGNITO
@@ -221,7 +220,7 @@ ensure_cognito() {
     --token-validity-units "AccessToken=minutes,IdToken=minutes,RefreshToken=days")
   if [ -z "$CLIENT_ID" ] || [ "$CLIENT_ID" = "None" ]; then
     say "Creating Cognito app client"
-    CLIENT_ID="$(aws cognito-idp create-user-pool-client "${CLIENT_ARGS[@]}" \
+    CLIENT_ID="$(aws cognito-idp create-user-pool-client "${CLIENT_ARGS[@]}" --no-generate-secret \
       --query UserPoolClient.ClientId --output text)"
   else
     aws cognito-idp update-user-pool-client "${CLIENT_ARGS[@]}" --client-id "$CLIENT_ID" >/dev/null
@@ -315,7 +314,7 @@ EOF
   # Merge USERS_TABLE into the existing environment (update replaces it).
   aws lambda get-function-configuration --function-name "$ORCH_FUNCTION" --region "$REGION" \
     --query Environment.Variables --output json > "$TMP/env-old.json"
-  python3 - "$TMP/env-old.json" "$TMP/env-new.json" "$TABLE" <<'PY'
+  python3 - "$(wp "$TMP/env-old.json")" "$(wp "$TMP/env-new.json")" "$TABLE" <<'PY'
 import json, sys
 env = json.load(open(sys.argv[1])) or {}
 env["USERS_TABLE"] = sys.argv[3]
@@ -332,7 +331,7 @@ ensure_distribution
 
 if [ "$SITE_ONLY" = "1" ]; then
   # Reuse the live settings already baked into the published config.js.
-  aws s3 cp "s3://$SITE_BUCKET/config.js" "$TMP/config.js" --region "$REGION" >/dev/null
+  aws s3 cp "s3://$SITE_BUCKET/config.js" "$(wp "$TMP/config.js")" --region "$REGION" >/dev/null
   publish_site
   echo "Site: $SITE_URL"; exit 0
 fi
